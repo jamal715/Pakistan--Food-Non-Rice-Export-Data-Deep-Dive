@@ -3,7 +3,6 @@ from __future__ import annotations
 import html
 import re
 from dataclasses import dataclass
-from typing import Iterable
 
 import numpy as np
 import pandas as pd
@@ -52,6 +51,11 @@ def _clean_text(x):
     return x or pd.NA
 
 
+def _first_nonnull(s: pd.Series):
+    s = s.dropna()
+    return s.iloc[0] if len(s) else pd.NA
+
+
 def _canonicalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     lower = {str(c).strip().lower(): c for c in df.columns}
     rename = {}
@@ -67,8 +71,13 @@ def _canonicalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 def load_excel(file_or_path, sheet_name: str | None = None) -> tuple[pd.DataFrame, str]:
     xls = pd.ExcelFile(file_or_path)
     if sheet_name is None:
-        candidates = [s for s in xls.sheet_names if s.lower().startswith("hs_")]
-        sheet_name = candidates[0] if candidates else xls.sheet_names[0]
+        scored = []
+        for s in xls.sheet_names:
+            preview = pd.read_excel(xls, sheet_name=s, nrows=5)
+            cols = {str(c).strip().lower() for c in preview.columns}
+            score = sum(any(alias.lower() in cols for alias in aliases) for aliases in ALIASES.values())
+            scored.append((score, s))
+        sheet_name = max(scored)[1] if scored else xls.sheet_names[0]
     return pd.read_excel(xls, sheet_name=sheet_name), sheet_name
 
 
@@ -98,9 +107,9 @@ def audit(df: pd.DataFrame) -> Audit:
     if len(chapters) > 1:
         warnings.append(f"Input contains multiple HS2 chapters: {', '.join(chapters)}")
     if "reported_record_count" in df:
-        warnings.append("reported_record_count is an observation/frequency field; it is NOT physical export quantity. Value/count is not a unit price.")
+        warnings.append("reported_record_count is a TDAP observation/frequency field; it is NOT physical export quantity. Value/count is not a unit price.")
     warnings.append("TDAP export period/year must be treated as unresolved unless a year field is explicitly present in the supplied dataset/source metadata.")
-    warnings.append("Shares computed here are shares of the supplied extract, not automatically shares of Pakistan's national exports.")
+    warnings.append("Shares computed here are shares of the supplied TDAP extract, not automatically shares of Pakistan's national exports.")
     if "ntn" in df and df["ntn"].dropna().nunique() == len(df):
         warnings.append("NTN is unique by row. Firm-level product diversification cannot be inferred if the extract retains only one HS8 row per firm.")
     return Audit(
@@ -116,18 +125,26 @@ def audit(df: pd.DataFrame) -> Audit:
 
 def exporter_table(df: pd.DataFrame) -> pd.DataFrame:
     keys = [c for c in ["ntn", "exporter_name"] if c in df]
-    g = df.groupby(keys, dropna=False).agg(
-        reported_value_rs=("exported_value_rs", "sum"),
-        hs8_count=("hs8", "nunique"),
-        hs4_count=("hs4", "nunique"),
-        record_count=("reported_record_count", "sum") if "reported_record_count" in df else ("hs8", "size"),
-    ).reset_index()
+    agg = {
+        "reported_value_rs": ("exported_value_rs", "sum"),
+        "hs8_count": ("hs8", "nunique"),
+        "hs4_count": ("hs4", "nunique"),
+        "record_count": ("reported_record_count", "sum") if "reported_record_count" in df else ("hs8", "size"),
+        "largest_hs8": ("hs8", lambda s: s.loc[df.loc[s.index, "exported_value_rs"].idxmax()] if len(s) else pd.NA),
+    }
+    for c in ["email", "telephone", "address"]:
+        if c in df:
+            agg[c] = (c, _first_nonnull)
+    g = df.groupby(keys, dropna=False).agg(**agg).reset_index()
     total = g.reported_value_rs.sum()
     g = g.sort_values("reported_value_rs", ascending=False).reset_index(drop=True)
-    g["rank"] = np.arange(1, len(g)+1)
+    g["rank"] = np.arange(1, len(g) + 1)
     g["share"] = g.reported_value_rs / total if total else 0
     g["cumulative_share"] = g.share.cumsum()
-    return g
+    g["avg_value_per_reported_record_rs"] = np.where(g["record_count"] > 0, g["reported_value_rs"] / g["record_count"], np.nan)
+    cols = ["rank"] + keys + ["reported_value_rs", "share", "cumulative_share", "record_count", "avg_value_per_reported_record_rs", "hs8_count", "hs4_count", "largest_hs8"]
+    cols += [c for c in ["email", "telephone", "address"] if c in g]
+    return g[cols]
 
 
 def hs8_table(df: pd.DataFrame) -> pd.DataFrame:
@@ -137,7 +154,7 @@ def hs8_table(df: pd.DataFrame) -> pd.DataFrame:
     g = df.groupby(["hs8", "hs4", "product_name"], dropna=False).agg(**aggs).reset_index()
     total = g.reported_value_rs.sum()
     g = g.sort_values("reported_value_rs", ascending=False).reset_index(drop=True)
-    g["rank"] = np.arange(1, len(g)+1)
+    g["rank"] = np.arange(1, len(g) + 1)
     g["share"] = g.reported_value_rs / total if total else 0
     g["cumulative_share"] = g.share.cumsum()
     return g
@@ -146,26 +163,29 @@ def hs8_table(df: pd.DataFrame) -> pd.DataFrame:
 def concentration(df: pd.DataFrame) -> dict:
     e = exporter_table(df)
     shares = e.share.to_numpy()
+    cum = e.cumulative_share.to_numpy()
+    def n_to(threshold: float) -> int:
+        return int(np.searchsorted(cum, threshold) + 1) if len(cum) else 0
     return {
         "total_value_rs": float(e.reported_value_rs.sum()),
         "top1_share": float(shares[:1].sum()),
         "top5_share": float(shares[:5].sum()),
         "top10_share": float(shares[:10].sum()),
+        "top20_share": float(shares[:20].sum()),
         "hhi": float(np.square(shares).sum() * 10000),
-        "exporters_to_60pct": int(np.searchsorted(e.cumulative_share.to_numpy(), 0.60) + 1) if len(e) else 0,
+        "exporters_to_25pct": n_to(0.25),
+        "exporters_to_50pct": n_to(0.50),
+        "exporters_to_60pct": n_to(0.60),
+        "exporters_to_80pct": n_to(0.80),
+        "exporters_to_90pct": n_to(0.90),
     }
 
 
 def strategic_screen(df: pd.DataFrame) -> pd.DataFrame:
-    """Evidence-based screening using only fields actually present in TDAP extract.
-
-    This deliberately does NOT claim new destinations, growth, unit value, or geopolitical fit;
-    those require country/time/quantity or external datasets.
-    """
-    e = exporter_table(df)
+    """Evidence-based screening using only fields actually present in the TDAP extract."""
     hs = hs8_table(df)[["hs8", "exporters"]].rename(columns={"exporters": "firms_in_hs8"})
-    base = df[[c for c in ["ntn", "exporter_name", "hs8", "hs4", "product_name", "exported_value_rs"] if c in df]].copy()
-    base = base.merge(hs, on="hs8", how="left")
+    base_cols = [c for c in ["ntn", "exporter_name", "hs8", "hs4", "product_name", "exported_value_rs", "email", "telephone"] if c in df]
+    base = df[base_cols].copy().merge(hs, on="hs8", how="left")
     base["scarcity_score"] = 1 / base["firms_in_hs8"].clip(lower=1)
     base["scale_percentile"] = base["exported_value_rs"].rank(pct=True)
     base["capability_score"] = 100 * (0.65 * base["scale_percentile"] + 0.35 * base["scarcity_score"].rank(pct=True))
