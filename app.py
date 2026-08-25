@@ -9,6 +9,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 import src.analysis as analysis
+from src.reconciliation import reconcile_chapter
 
 analysis = importlib.reload(analysis)
 audit = analysis.audit
@@ -116,6 +117,7 @@ c = concentration(df)
 exporters = exporter_table(df)
 hs8 = hs8_table(df)
 screen = strategic_screen(df)
+reconciliation = reconcile_chapter(df)
 chapter_label = ", ".join(a.chapters) if a.chapters else (_chapter_code(sheet) or "Unknown")
 
 SCREEN_REQUIRED = {"evidence_tier", "chapter_rank", "exporter_name", "firm_chapter_value_rs", "firm_chapter_share", "hs8", "hs8_value_rs", "rank_within_hs8", "share_within_hs8", "firms_in_hs8", "screening_reason"}
@@ -126,7 +128,7 @@ if missing_screen:
 
 logo_uri = _logo_data_uri()
 logo_html = f'<img class="hero-logo" src="{logo_uri}" alt="NCGCL logo">' if logo_uri else ""
-st.markdown(f'''<div class="hero"><div class="hero-copy"><span class="badge">STRATEGIC PLANNING CELL</span><span class="badge">EXPORT ANALYTICS</span><h1>Pakistan Export Intelligence</h1><p>HS Chapter {chapter_label} · Executive decision dashboard</p></div>{logo_html}</div>''', unsafe_allow_html=True)
+st.markdown(f'''<div class="hero"><div class="hero-copy"><span class="badge">EXPORT ANALYTICS</span><h1>Pakistan Export Intelligence</h1><p>HS Chapter {chapter_label} · Executive decision dashboard</p></div>{logo_html}</div>''', unsafe_allow_html=True)
 
 with st.expander("Search & analytical controls", expanded=False):
     x1, x2, x3 = st.columns([2, 1, 1])
@@ -205,7 +207,6 @@ with shortlist:
     m1.metric("Tier A · high-priority evidence", a_count, help="Firm is top-decile by observed chapter scale, top 3 within its HS8, and has at least 10% of observed HS8 value.")
     m2.metric("Tier B · priority review", b_count, help="Either top 3 with at least 10% observed HS8 share, or a top-decile firm in an HS8 with five or fewer observed firms.")
     m3.metric("Tier C · broader pipeline", c_count, help="All other observed exporter-HS8 capabilities. These remain visible and are not treated as failures.")
-    st.markdown("**How to read the screen** — `Firm chapter value` measures the company's total observed scale in this chapter. `HS8 value` isolates this specific product capability. `HS8 rank` and `HS8 share` show the firm's position inside that product. `Firms in HS8` shows participation. `Breadth` counts distinct products observed for the firm. No hidden weighted composite score determines the tier.")
     tier_options = ["A — high-priority evidence", "B — priority review", "C — broader pipeline"]
     tier_filter = st.multiselect("Evidence tier", tier_options, default=tier_options[:2])
     s = screen[screen["evidence_tier"].isin(tier_filter)].copy() if tier_filter else screen.copy()
@@ -221,11 +222,21 @@ with shortlist:
         "firms_in_hs8": "Firms in HS8", "screening_reason": "Why surfaced",
     })
     st.markdown("**Tier rules**  \n**A:** firm is in the top 10% by observed chapter scale **and** ranks top 3 in the HS8 **and** contributes at least 10% of observed HS8 value.  \n**B:** either (i) top 3 in HS8 with ≥10% observed HS8 share, or (ii) top-10%-scale firm operating in an HS8 with ≤5 observed firms.  \n**C:** broader pipeline. These thresholds are policy screening rules, not statistical estimates; change them only through documented methodology review.")
-    st.info("The previous 65% scale + 35% scarcity 'Capability score' has been removed from primary decisioning because percentile-of-percentile weighting was difficult to explain and could make a common HS8 appear artificially strong. Observable components are now shown directly.")
     st.download_button("Download evidence screen", s[show].to_csv(index=False).encode("utf-8-sig"), "exporter_hs8_evidence_screen.csv", "text/csv")
 
 with diligence:
-    st.subheader("Data assurance & board-use status")
+    st.subheader("Data assurance & reconciliation")
+    r1, r2, r3 = st.columns(3)
+    r1.metric("Reconciliation status", "PASS" if reconciliation.passed else "FAIL")
+    r2.metric("Checks passed", reconciliation.summary["passed_checks"])
+    r3.metric("Checks failed", reconciliation.summary["failed_checks"])
+    if reconciliation.passed:
+        st.success("Selected chapter reconciles to the source dataframe across totals, shares, concentration and exporter × HS8 calculations.")
+    else:
+        st.error("One or more reconciliation controls failed. Do not rely on the affected outputs until the differences are resolved.")
+    st.dataframe(reconciliation.checks, hide_index=True, use_container_width=True)
+    st.download_button("Download reconciliation report", reconciliation.checks.to_csv(index=False).encode("utf-8-sig"), f"chapter_{chapter_label}_reconciliation.csv", "text/csv")
+    st.subheader("Source controls")
     checks = pd.DataFrame({"Control": ["Source mode", "Source sheet", "Source rows", "Source columns", "Duplicate rows", "Invalid HS8", "Non-positive/missing value", "Unique exporters", "Unique NTNs", "Unique HS8", "Detected chapter"], "Result": [source_mode, sheet, a.rows, a.columns, a.duplicate_rows, a.invalid_hs8, a.nonpositive_values, a.unique_exporters, a.unique_ntns, a.unique_hs8, chapter_label]})
     st.dataframe(checks, hide_index=True, use_container_width=True)
     for warning in a.warnings:
@@ -238,8 +249,9 @@ with methodology:
 **Not inferred:** national market share, destination attractiveness, growth, physical unit value, credit quality, financing suitability or geopolitical fit.  
 **Screening principle:** keep company-level scale separate from product-level capability. Surface the evidence used for prioritisation instead of hiding it inside a composite score. Tier rules are explicit policy thresholds and are not statistical estimates.  
 **Workbook principle:** a 24-sheet workbook is a navigation container only. One selected HS2 sheet is analysed at a time so rankings, shares and concentration remain chapter-specific.  
+**Reconciliation principle:** each selected chapter is independently re-aggregated from source fields and compared with dashboard totals, concentration metrics, exporter-HS8 values, shares and ranks. Any failed control is surfaced in Data Assurance.  
 **Next enrichment:** PBS HS8 × destination × value × quantity × fiscal year, followed by global demand, Pakistan share, competitor concentration, market access and policy indicators.""")
-    st.code("Workbook → chapter selector → normalization → audit → company aggregation → HS8 aggregation → exporter×HS8 aggregation → within-HS8 position → transparent evidence tier → due diligence")
+    st.code("Workbook → chapter selector → normalization → audit → company aggregation → HS8 aggregation → exporter×HS8 aggregation → within-HS8 position → transparent evidence tier → reconciliation → due diligence")
 
 st.divider()
 st.caption(f"Source: {source_mode} · Sheet: {sheet} · Chapter {chapter_label} · {a.rows:,} rows · {a.unique_exporters:,} exporters | Internal decision-support")
