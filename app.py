@@ -1,10 +1,23 @@
 from __future__ import annotations
 from pathlib import Path
+import importlib
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-from src.analysis import audit, concentration, exporter_table, hs8_table, load_excel, normalize, strategic_screen
+import src.analysis as analysis
+
+# Streamlit can keep imported modules alive across hot-reloads. Reload the analytical
+# engine explicitly so app.py and src/analysis.py always run from the same deployed
+# repository revision after a GitHub update.
+analysis = importlib.reload(analysis)
+audit = analysis.audit
+concentration = analysis.concentration
+exporter_table = analysis.exporter_table
+hs8_table = analysis.hs8_table
+load_excel = analysis.load_excel
+normalize = analysis.normalize
+strategic_screen = analysis.strategic_screen
 
 st.set_page_config(page_title="Pakistan Export Intelligence", page_icon="🇵🇰", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""<style>
@@ -20,6 +33,16 @@ with st.sidebar:
 raw,sheet=load_excel(source); df=normalize(raw); a=audit(df)
 if a.missing_required: st.error("Missing required fields: "+", ".join(a.missing_required)); st.stop()
 c=concentration(df); exporters=exporter_table(df); hs8=hs8_table(df); screen=strategic_screen(df); chapter_label=", ".join(a.chapters) if a.chapters else "Unknown"
+
+# Contract check: every chapter workbook using the canonical TDAP fields must produce
+# the same strategic-screen schema. This prevents a stale analytical module or a
+# chapter-specific assumption from crashing the live application with AttributeError.
+SCREEN_REQUIRED={"evidence_tier","chapter_rank","exporter_name","firm_chapter_value_rs","firm_chapter_share","hs8","hs8_value_rs","rank_within_hs8","share_within_hs8","firms_in_hs8","screening_reason"}
+missing_screen=sorted(SCREEN_REQUIRED-set(screen.columns))
+if missing_screen:
+    st.error("Analytical engine/schema mismatch. Missing strategic-screen fields: "+", ".join(missing_screen)+". The app has stopped rather than displaying inconsistent results. Restart/redeploy the app from the current main branch.")
+    st.stop()
+
 st.markdown(f'''<div class="hero"><span class="badge">STRATEGIC PLANNING CELL</span><span class="badge">EXPORT ANALYTICS</span><h1>Pakistan Export Intelligence</h1><p>HS Chapter {chapter_label} · Executive decision dashboard</p></div>''',unsafe_allow_html=True)
 with st.expander("Search & analytical controls",expanded=False):
     x1,x2,x3=st.columns([2,1,1]); q=x1.text_input("Find exporter",placeholder="Company, NTN, email, phone or address"); top_n=x2.slider("Ranking depth",10,min(100,max(10,len(exporters))),min(25,max(10,len(exporters)))); threshold=x3.selectbox("Strategic coverage",[50,60,70,80,90],index=1)
@@ -50,11 +73,12 @@ with products:
 with shortlist:
     st.subheader("Exporter × HS8 evidence screen")
     st.caption("A transparent prioritisation screen for due diligence. One row = one exporter × HS8 capability after aggregation. It is not a financing recommendation and does not claim national market share.")
-    a_count=int((screen.evidence_tier=="A — high-priority evidence").sum()); b_count=int((screen.evidence_tier=="B — priority review").sum()); c_count=int((screen.evidence_tier=="C — broader pipeline").sum())
+    a_count=int((screen["evidence_tier"]=="A — high-priority evidence").sum()); b_count=int((screen["evidence_tier"]=="B — priority review").sum()); c_count=int((screen["evidence_tier"]=="C — broader pipeline").sum())
     m1,m2,m3=st.columns(3); m1.metric("Tier A · high-priority evidence",a_count,help="Firm is top-decile by observed chapter scale, top 3 within its HS8, and has at least 10% of observed HS8 value."); m2.metric("Tier B · priority review",b_count,help="Either top 3 with at least 10% observed HS8 share, or a top-decile firm in an HS8 with five or fewer observed firms."); m3.metric("Tier C · broader pipeline",c_count,help="All other observed exporter-HS8 capabilities. These remain visible and are not treated as failures.")
     st.markdown("**How to read the screen** — `Firm chapter value` measures the company's total observed scale in this chapter. `HS8 value` isolates this specific product capability. `HS8 rank` and `HS8 share` show the firm's position inside that product. `Firms in HS8` shows participation. `Breadth` counts distinct products observed for the firm. No hidden weighted composite score determines the tier.")
-    tier_filter=st.multiselect("Evidence tier",["A — high-priority evidence","B — priority review","C — broader pipeline"],default=["A — high-priority evidence","B — priority review"])
-    s=screen[screen.evidence_tier.isin(tier_filter)].copy() if tier_filter else screen.copy()
+    tier_options=["A — high-priority evidence","B — priority review","C — broader pipeline"]
+    tier_filter=st.multiselect("Evidence tier",tier_options,default=tier_options[:2])
+    s=screen[screen["evidence_tier"].isin(tier_filter)].copy() if tier_filter else screen.copy()
     show=[x for x in ["evidence_tier","chapter_rank","exporter_name","ntn","firm_chapter_value_rs","firm_chapter_share","firm_hs8_breadth","hs8","product_name","hs8_value_rs","rank_within_hs8","share_within_hs8","firms_in_hs8","screening_reason","email","telephone"] if x in s]
     st.dataframe(s[show],hide_index=True,use_container_width=True,height=680,column_config={"evidence_tier":"Evidence tier","chapter_rank":"Company chapter rank","exporter_name":"Exporter","ntn":"NTN","firm_chapter_value_rs":st.column_config.NumberColumn("Firm chapter value (Rs)",format="%,.0f"),"firm_chapter_share":st.column_config.NumberColumn("Firm extract share",format="%.2%%"),"firm_hs8_breadth":"Observed HS8 breadth","hs8":"HS8","product_name":"Product","hs8_value_rs":st.column_config.NumberColumn("HS8 value (Rs)",format="%,.0f"),"rank_within_hs8":"HS8 rank","share_within_hs8":st.column_config.NumberColumn("Observed HS8 share",format="%.1%%"),"firms_in_hs8":"Firms in HS8","screening_reason":"Why surfaced"})
     st.markdown("**Tier rules**  \n**A:** firm is in the top 10% by observed chapter scale **and** ranks top 3 in the HS8 **and** contributes at least 10% of observed HS8 value.  \n**B:** either (i) top 3 in HS8 with ≥10% observed HS8 share, or (ii) top-10%-scale firm operating in an HS8 with ≤5 observed firms.  \n**C:** broader pipeline. These thresholds are policy screening rules, not statistical estimates; change them only through documented methodology review.")
