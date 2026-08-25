@@ -11,10 +11,17 @@ def test_executive_dashboard_readability_guards():
     assert 'HHI concentration index' in source
     assert 'CLEAN_PLOT_CONFIG' in source
     assert 'displayModeBar' in source
-    # Strategic-screen V4 no longer renders the old Plotly gauge whose
-    # Indicator number used `valueformat`. Guard the current explicit
-    # percentage formatting and evidence-screen labels instead.
     assert "{c['top10_share']*100:.0f}%" in source
     assert 'Observed HS8 share' in source
     assert 'Evidence tier' in source
     assert 'Why surfaced' in source
+
+
+def test_app_reloads_analysis_engine_and_guards_screen_schema():
+    source = Path("app.py").read_text(encoding="utf-8")
+    assert 'importlib.reload(analysis)' in source
+    assert 'SCREEN_REQUIRED' in source
+    assert 'evidence_tier' in source
+    assert 'rank_within_hs8' in source
+    assert 'share_within_hs8' in source
+    assert 'Analytical engine/schema mismatch' in source
