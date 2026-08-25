@@ -43,3 +43,14 @@ def test_ncgcl_logo_is_supported_in_hero():
     assert 'LOGO_FILE = Path("assets/ncgcl_logo.png")' in source
     assert 'hero-logo' in source
     assert 'NCGCL logo' in source
+
+
+def test_reconciliation_is_visible_and_old_copy_is_removed():
+    source = Path("app.py").read_text(encoding="utf-8")
+    assert 'reconcile_chapter' in source
+    assert 'Reconciliation status' in source
+    assert 'Download reconciliation report' in source
+    assert 'Data assurance & reconciliation' in source
+    assert 'STRATEGIC PLANNING CELL' not in source
+    assert 'How to read the screen' not in source
+    assert "The previous 65% scale + 35% scarcity" not in source
