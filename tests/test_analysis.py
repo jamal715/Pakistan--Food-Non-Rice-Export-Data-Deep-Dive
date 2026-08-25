@@ -14,7 +14,8 @@ def sample():
 
 
 def test_normalization_and_audit():
-    df = normalize(sample()); a = audit(df)
+    df = normalize(sample())
+    a = audit(df)
     assert a.missing_required == []
     assert a.unique_exporters == 3
     assert a.unique_hs8 == 2
@@ -50,6 +51,21 @@ def test_strategic_screen_is_exporter_hs8_and_explainable():
     assert a.firm_chapter_value_rs == 60
     assert a.rank_within_hs8 == 1
     assert a.firms_in_hs8 == 2
-    assert round(a.share_within_hs8, 4) == round(60/90, 4)
+    assert round(a.share_within_hs8, 4) == round(60 / 90, 4)
     assert "HS8 rank 1 of 2" in a.screening_reason
     assert "capability_score" not in s.columns
+
+
+def test_firm_scale_percentile_is_computed_on_unique_firms_not_repeated_hs8_rows():
+    df = normalize(pd.DataFrame({
+        "master_name": ["A", "A", "B", "C"],
+        "ptc_code": [12074000, 12119000, 12074000, 12119000],
+        "ExpSum": [50, 50, 60, 40],
+        "NTN": ["1", "1", "2", "3"],
+        "product_name": ["Sesame", "Plants", "Sesame", "Plants"],
+    }))
+    s = strategic_screen(df)
+    a_rows = s[s.ntn == "1"]
+    assert len(a_rows) == 2
+    assert a_rows.firm_scale_percentile.nunique() == 1
+    assert round(float(a_rows.firm_scale_percentile.iloc[0]), 6) == 1.0
