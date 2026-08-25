@@ -25,3 +25,21 @@ def test_app_reloads_analysis_engine_and_guards_screen_schema():
     assert 'rank_within_hs8' in source
     assert 'share_within_hs8' in source
     assert 'Analytical engine/schema mismatch' in source
+
+
+def test_master_workbook_and_single_chapter_modes_are_preserved():
+    source = Path("app.py").read_text(encoding="utf-8")
+    assert 'MASTER_FILE = Path("TDAP_Export_Directory_HS01_24.xlsx")' in source
+    assert 'LEGACY_FILE = Path("Chapter_12.xlsx")' in source
+    assert 'Select HS chapter' in source
+    assert 'Use a different workbook' in source
+    assert 'Repository master workbook' in source
+    assert 'Legacy single-chapter workbook' in source
+    assert 'active analytical sheet contains more than one HS2 chapter' in source
+
+
+def test_ncgcl_logo_is_supported_in_hero():
+    source = Path("app.py").read_text(encoding="utf-8")
+    assert 'LOGO_FILE = Path("assets/ncgcl_logo.png")' in source
+    assert 'hero-logo' in source
+    assert 'NCGCL logo' in source
