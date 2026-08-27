@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from io import BytesIO
 from pathlib import Path
 import base64
 import importlib
@@ -10,6 +11,7 @@ import plotly.express as px
 import streamlit as st
 import src.analysis as analysis
 from src.contact_enrichment import enrich_contact_display, load_contact_workbook
+from src.deep_dive import exporter_portfolio, find_exporters, hs8_exporters, load_cross_chapter_universe
 from src.reconciliation import reconcile_chapter
 
 analysis = importlib.reload(analysis)
@@ -69,6 +71,16 @@ def _logo_data_uri() -> str | None:
     if not LOGO_FILE.exists():
         return None
     return "data:image/png;base64," + base64.b64encode(LOGO_FILE.read_bytes()).decode("ascii")
+
+
+@st.cache_data(show_spinner=False)
+def _cross_chapter_from_path(path_string: str):
+    return load_cross_chapter_universe(Path(path_string))
+
+
+@st.cache_data(show_spinner=False)
+def _cross_chapter_from_bytes(payload: bytes):
+    return load_cross_chapter_universe(BytesIO(payload))
 
 
 with st.sidebar:
@@ -139,6 +151,7 @@ chapter_label = ", ".join(a.chapters) if a.chapters else (_chapter_code(sheet) o
 # evidence tiers or reconciliation results.
 contact_error = None
 contact_audit = None
+contacts = None
 if contact_source is not None:
     try:
         contacts = load_contact_workbook(contact_source)
@@ -146,6 +159,7 @@ if contact_source is not None:
         screen_display, contact_audit = enrich_contact_display(screen, df, contacts, chapter_label)
     except Exception as exc:
         contact_error = str(exc)
+        contacts = None
         exporters_display = exporters.copy()
         screen_display = screen.copy()
 else:
@@ -156,6 +170,24 @@ if "contact_phone" not in exporters_display:
     exporters_display["contact_phone"] = exporters_display["telephone"].fillna("") if "telephone" in exporters_display else ""
 if "contact_phone" not in screen_display:
     screen_display["contact_phone"] = screen_display["telephone"].fillna("") if "telephone" in screen_display else ""
+
+# The deep-dive universe is a separate read-only aggregation across chapter sheets. Existing
+# chapter calculations above are already complete before this dataset is built.
+deep_dive_error = None
+deep_universe = None
+deep_audit = None
+deep_source_mode = source_mode
+try:
+    deep_source = source
+    if len(valid_sheets) <= 1 and MASTER_FILE.exists():
+        deep_source = MASTER_FILE
+        deep_source_mode = "Repository master workbook (cross-chapter deep dive)"
+    if hasattr(deep_source, "getvalue"):
+        deep_universe, deep_audit = _cross_chapter_from_bytes(deep_source.getvalue())
+    else:
+        deep_universe, deep_audit = _cross_chapter_from_path(str(deep_source))
+except Exception as exc:
+    deep_dive_error = str(exc)
 
 SCREEN_REQUIRED = {"evidence_tier", "chapter_rank", "exporter_name", "firm_chapter_value_rs", "firm_chapter_share", "hs8", "hs8_value_rs", "rank_within_hs8", "share_within_hs8", "firms_in_hs8", "screening_reason"}
 missing_screen = sorted(SCREEN_REQUIRED - set(screen.columns))
@@ -181,7 +213,7 @@ if q.strip():
         mask |= filtered[col].astype("string").str.contains(q.strip(), case=False, na=False)
     filtered = filtered[mask]
 
-overview, leaders, products, shortlist, diligence, methodology = st.tabs(["Executive Brief", "Exporter Intelligence", "Product Portfolio", "Strategic Shortlist", "Data Assurance", "Methodology"])
+overview, leaders, products, deep_dive, shortlist, diligence, methodology = st.tabs(["Executive Brief", "Exporter Intelligence", "Product Portfolio", "Exporter / Product Deep Dive", "Strategic Shortlist", "Data Assurance", "Methodology"])
 
 with overview:
     k1, k2, k3, k4, k5, k6 = st.columns(6)
@@ -233,6 +265,95 @@ with products:
         "share": st.column_config.NumberColumn("Extract share", format="%.2%%"),
         "cumulative_share": st.column_config.NumberColumn("Cumulative", format="%.2%%"),
     })
+
+with deep_dive:
+    st.subheader("Exporter / Product Deep Dive")
+    st.caption("Cross-chapter research view. It reads the available HS chapter sheets as a separate universe and does not change the selected-chapter rankings, HHI, strategic tiers or reconciliation above.")
+    if deep_dive_error:
+        st.error("Cross-chapter deep dive could not be built: " + deep_dive_error)
+    elif deep_universe is None or deep_audit is None:
+        st.info("No cross-chapter universe is available.")
+    else:
+        st.caption(f"Deep-dive source: {deep_source_mode} · {len(deep_audit.chapters)} HS chapters · {deep_audit.rows:,} source rows · {deep_audit.unique_ntns:,} verified NTNs · {deep_audit.unique_hs8:,} HS8 products")
+        search_mode = st.radio("Explore by", ["Exporter (name or NTN)", "HS8 product"], horizontal=True, key="deep_dive_mode")
+
+        if search_mode == "Exporter (name or NTN)":
+            exporter_query = st.text_input("Search exporter", placeholder="Type company name or NTN", key="deep_exporter_query")
+            if exporter_query.strip():
+                matches = find_exporters(deep_universe, exporter_query)
+                if matches.empty:
+                    st.warning("No verified NTN matched that exporter search across the loaded chapter universe.")
+                else:
+                    option_map = {}
+                    for _, row in matches.iterrows():
+                        label = f"{row['exporter_name']} · NTN {row['ntn']} · {row['hs8_products']} HS8 · {row['chapters']} chapters"
+                        option_map[label] = row["ntn"]
+                    selected_exporter = st.selectbox("Select verified exporter identity", list(option_map), key="deep_exporter_select")
+                    profile = exporter_portfolio(deep_universe, option_map[selected_exporter], contacts)
+                    sm = profile.summary
+                    d1, d2, d3, d4 = st.columns(4)
+                    d1.metric("Total reported value", f"Rs {sm['total_reported_value_rs']/1e9:,.2f} bn")
+                    d2.metric("Distinct HS8 products", f"{sm['hs8_products']:,}")
+                    d3.metric("HS chapters observed", f"{sm['chapters']:,}")
+                    d4.metric("NTN", sm["ntn"])
+                    st.markdown(f"**{sm['exporter_name']}**")
+                    if sm["name_aliases"] and sm["name_aliases"] != sm["exporter_name"]:
+                        st.caption("Observed name aliases: " + sm["name_aliases"])
+                    st.caption("Phone: " + (sm["phones"] or "Not safely available") + " · Email: " + (sm["emails"] or "Not available"))
+                    st.markdown("**Product mix** — each share equals this exporter's reported value in the HS8 divided by this exporter's total reported value across the loaded HS chapters.")
+                    chart = profile.table.sort_values("share_of_exporter")
+                    fig = px.bar(chart, x="share_of_exporter", y="hs8", orientation="h", hover_data=["chapter", "product_name", "reported_value_rs"], labels={"share_of_exporter": "Share of exporter portfolio", "hs8": "HS8"}, height=max(420, min(900, len(chart) * 30)))
+                    fig.update_xaxes(tickformat=".0%")
+                    st.plotly_chart(fig, use_container_width=True, config=CLEAN_PLOT_CONFIG)
+                    st.dataframe(profile.table, hide_index=True, use_container_width=True, column_config={
+                        "rank": "Rank", "chapter": "HS chapter", "hs8": "HS8", "product_name": "Product description",
+                        "reported_value_rs": st.column_config.NumberColumn("Reported value (Rs)", format="%,.0f"),
+                        "share_of_exporter": st.column_config.NumberColumn("Share of exporter portfolio", format="%.2%%"),
+                        "source_rows": "Source rows",
+                    })
+                    with st.expander("Calculation controls", expanded=False):
+                        st.code("HS8 share of exporter = exporter value in that HS8 / exporter total value across all loaded HS chapters")
+                        st.dataframe(profile.checks, hide_index=True, use_container_width=True)
+                    st.download_button("Download exporter product portfolio", profile.table.to_csv(index=False).encode("utf-8-sig"), f"exporter_{sm['ntn']}_hs8_portfolio.csv", "text/csv")
+
+        else:
+            hs8_query = st.text_input("Enter exact HS8 code", placeholder="e.g. 12074000", key="deep_hs8_query")
+            if hs8_query.strip():
+                digits = re.sub(r"\D", "", hs8_query)
+                if len(digits) != 8:
+                    st.warning("Enter an exact 8-digit HS8 code so the denominator remains unambiguous.")
+                else:
+                    try:
+                        profile = hs8_exporters(deep_universe, digits, contacts)
+                    except KeyError as exc:
+                        st.warning(str(exc))
+                    except ValueError as exc:
+                        st.warning(str(exc))
+                    else:
+                        sm = profile.summary
+                        h1, h2, h3, h4 = st.columns(4)
+                        h1.metric("HS8 total reported value", f"Rs {sm['total_reported_value_rs']/1e9:,.2f} bn")
+                        h2.metric("Observed exporters", f"{sm['exporters']:,}")
+                        h3.metric("Verified NTN exporters", f"{sm['verified_ntn_exporters']:,}")
+                        h4.metric("HS chapter", sm["chapter"])
+                        st.markdown(f"**HS8 {sm['hs8']} — {sm['product_name'] or 'Description unavailable'}**")
+                        if sm["missing_ntn_exporters"]:
+                            st.caption(f"{sm['missing_ntn_exporters']} observed exporter identities have no NTN. They remain in the HS8 denominator and are clearly flagged rather than being dropped or assigned to another firm.")
+                        st.markdown("**Exporter position inside this HS8** — each share equals the exporter's reported value in this HS8 divided by the total reported value of this HS8 across the loaded chapter universe.")
+                        chart = profile.table.head(30).sort_values("share_of_hs8")
+                        fig = px.bar(chart, x="share_of_hs8", y="exporter_name", orientation="h", hover_data=["ntn", "reported_value_rs", "phone"], labels={"share_of_hs8": "Share of HS8", "exporter_name": ""}, height=max(480, min(1000, len(chart) * 30)))
+                        fig.update_xaxes(tickformat=".0%")
+                        st.plotly_chart(fig, use_container_width=True, config=CLEAN_PLOT_CONFIG)
+                        st.dataframe(profile.table, hide_index=True, use_container_width=True, height=650, column_config={
+                            "rank": "HS8 rank", "exporter_name": "Exporter", "ntn": "NTN", "phone": "Phone", "email": "Email",
+                            "reported_value_rs": st.column_config.NumberColumn("Reported HS8 value (Rs)", format="%,.0f"),
+                            "share_of_hs8": st.column_config.NumberColumn("Share of HS8", format="%.2%%"),
+                            "identity_status": "Identity status", "source_rows": "Source rows",
+                        })
+                        with st.expander("Calculation controls", expanded=False):
+                            st.code("Exporter share of HS8 = exporter reported value in the HS8 / total reported value of that HS8")
+                            st.dataframe(profile.checks, hide_index=True, use_container_width=True)
+                        st.download_button("Download HS8 exporter table", profile.table.to_csv(index=False).encode("utf-8-sig"), f"hs8_{sm['hs8']}_exporters.csv", "text/csv")
 
 with shortlist:
     st.subheader("Exporter × HS8 evidence screen")
@@ -317,11 +438,12 @@ with methodology:
 **Derived:** company-level chapter value/rank/share; exporter-HS8 aggregated value; within-HS8 rank/share; number of observed firms; HS8/HS4 breadth; transparent evidence tiers.  
 **Not inferred:** national market share, destination attractiveness, growth, physical unit value, credit quality, financing suitability or geopolitical fit.  
 **Screening principle:** keep company-level scale separate from product-level capability. Surface the evidence used for prioritisation instead of hiding it inside a composite score. Tier rules are explicit policy thresholds and are not statistical estimates.  
-**Workbook principle:** a 24-sheet workbook is a navigation container only. One selected HS2 sheet is analysed at a time so rankings, shares and concentration remain chapter-specific.  
+**Workbook principle:** a 24-sheet workbook is a navigation container for the existing chapter analytics. One selected HS2 sheet is analysed at a time so rankings, shares and concentration remain chapter-specific.  
+**Deep-dive principle:** the Exporter / Product Deep Dive separately reads all available chapter sheets. NTN is the primary exporter identity. Exporter product shares use the exporter's total value across the loaded chapters as denominator; HS8 exporter shares use the complete observed HS8 value as denominator. This cross-chapter view does not feed back into chapter KPIs or tiers.  
 **Reconciliation principle:** each selected chapter is independently re-aggregated from source fields and compared with dashboard totals, concentration metrics, exporter-HS8 values, shares and ranks. Any failed control is surfaced in Data Assurance.  
 **Contact-enrichment principle:** phone numbers are attached only after analytical calculations. Sidecar matches require the selected chapter, normalized exporter identity and exactly one NTN in the analytical source; conflicting contacts or ambiguous legal identities are withheld rather than guessed.  
 **Next enrichment:** PBS HS8 × destination × value × quantity × fiscal year, followed by global demand, Pakistan share, competitor concentration, market access and policy indicators.""")
-    st.code("Workbook → chapter selector → normalization → audit → company aggregation → HS8 aggregation → exporter×HS8 aggregation → within-HS8 position → transparent evidence tier → reconciliation → display-only contact enrichment → due diligence")
+    st.code("Workbook → chapter selector → chapter analytics/reconciliation | parallel cross-chapter universe → NTN exporter portfolio or HS8 exporter composition → display-only contact enrichment → due diligence")
 
 st.divider()
 st.caption(f"Source: {source_mode} · Sheet: {sheet} · Chapter {chapter_label} · {a.rows:,} rows · {a.unique_exporters:,} exporters | Internal decision-support")

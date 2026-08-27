@@ -69,3 +69,17 @@ def test_strategic_shortlist_has_safe_phone_next_to_ntn_and_compact_tiers():
     assert 'm3.metric("Tier C",' in source
     assert '"A — high-priority evidence": "A"' in source
     assert 'tier_filter = st.multiselect("Evidence tier", tier_options' in source
+
+
+def test_cross_chapter_exporter_product_deep_dive_is_separate_and_auditable():
+    source = Path("app.py").read_text(encoding="utf-8")
+    assert 'Exporter / Product Deep Dive' in source
+    assert 'load_cross_chapter_universe' in source
+    assert 'Exporter (name or NTN)' in source
+    assert 'HS8 product' in source
+    assert 'Select verified exporter identity' in source
+    assert 'Share of exporter portfolio' in source
+    assert 'Share of HS8' in source
+    assert 'HS8 share of exporter = exporter value in that HS8 / exporter total value across all loaded HS chapters' in source
+    assert 'Exporter share of HS8 = exporter reported value in the HS8 / total reported value of that HS8' in source
+    assert 'This cross-chapter view does not feed back into chapter KPIs or tiers.' in source
