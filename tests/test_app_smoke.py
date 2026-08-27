@@ -54,3 +54,14 @@ def test_reconciliation_is_visible_and_old_copy_is_removed():
     assert 'STRATEGIC PLANNING CELL' not in source
     assert 'How to read the screen' not in source
     assert "The previous 65% scale + 35% scarcity" not in source
+
+
+def test_strategic_shortlist_has_phone_next_to_ntn_and_compact_tiers():
+    source = Path("app.py").read_text(encoding="utf-8")
+    assert '["tier", "chapter_rank", "exporter_name", "ntn", "telephone", "firm_chapter_value_rs"' in source
+    assert '"telephone": "Phone"' in source
+    assert 'm1.metric("Tier A",' in source
+    assert 'm2.metric("Tier B",' in source
+    assert 'm3.metric("Tier C",' in source
+    assert '"A — high-priority evidence": "A"' in source
+    assert 'tier_filter = st.multiselect("Evidence tier", tier_options' in source
