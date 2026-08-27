@@ -9,6 +9,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 import src.analysis as analysis
+from src.contact_enrichment import enrich_contact_display, load_contact_workbook
 from src.reconciliation import reconcile_chapter
 
 analysis = importlib.reload(analysis)
@@ -34,6 +35,7 @@ st.markdown("""<style>
 
 MASTER_FILE = Path("TDAP_Export_Directory_HS01_24.xlsx")
 LEGACY_FILE = Path("Chapter_12.xlsx")
+CONTACT_FILE = Path("Contact_list_by_Company_hs_chapter.xlsx")
 LOGO_FILE = Path("assets/ncgcl_logo.png")
 PLOT_CONFIG = {"displaylogo": False, "responsive": True, "scrollZoom": False, "modeBarButtonsToRemove": ["lasso2d", "select2d", "autoScale2d", "toggleSpikelines"]}
 CLEAN_PLOT_CONFIG = {"displayModeBar": False, "responsive": True}
@@ -99,7 +101,19 @@ with st.sidebar:
         if selected_sheet:
             st.caption(f"Detected chapter sheet: {selected_sheet}")
 
+    contact_uploaded = st.file_uploader("Use a different contact workbook", type=["xlsx", "xlsm", "xls", "csv"], help="Optional display-only contact sidecar. It never enters export-value calculations.")
+    if contact_uploaded is not None:
+        contact_source = contact_uploaded
+        contact_source_mode = "Uploaded contact workbook"
+    elif CONTACT_FILE.exists():
+        contact_source = CONTACT_FILE
+        contact_source_mode = "Repository contact workbook"
+    else:
+        contact_source = None
+        contact_source_mode = "No contact sidecar loaded"
+
     st.caption(f"Source mode: {source_mode}")
+    st.caption(f"Contact mode: {contact_source_mode}")
     st.caption("Decision guardrails")
     st.caption("TDAP record count is not physical quantity. Extract shares are not Pakistan national shares until reconciled with official national totals.")
 
@@ -120,6 +134,29 @@ screen = strategic_screen(df)
 reconciliation = reconcile_chapter(df)
 chapter_label = ", ".join(a.chapters) if a.chapters else (_chapter_code(sheet) or "Unknown")
 
+# Contact enrichment is intentionally downstream of every analytical calculation above.
+# It adds display-only metadata and cannot change source rows, values, ranks, shares, HHI,
+# evidence tiers or reconciliation results.
+contact_error = None
+contact_audit = None
+if contact_source is not None:
+    try:
+        contacts = load_contact_workbook(contact_source)
+        exporters_display, exporter_contact_audit = enrich_contact_display(exporters, df, contacts, chapter_label)
+        screen_display, contact_audit = enrich_contact_display(screen, df, contacts, chapter_label)
+    except Exception as exc:
+        contact_error = str(exc)
+        exporters_display = exporters.copy()
+        screen_display = screen.copy()
+else:
+    exporters_display = exporters.copy()
+    screen_display = screen.copy()
+
+if "contact_phone" not in exporters_display:
+    exporters_display["contact_phone"] = exporters_display["telephone"].fillna("") if "telephone" in exporters_display else ""
+if "contact_phone" not in screen_display:
+    screen_display["contact_phone"] = screen_display["telephone"].fillna("") if "telephone" in screen_display else ""
+
 SCREEN_REQUIRED = {"evidence_tier", "chapter_rank", "exporter_name", "firm_chapter_value_rs", "firm_chapter_share", "hs8", "hs8_value_rs", "rank_within_hs8", "share_within_hs8", "firms_in_hs8", "screening_reason"}
 missing_screen = sorted(SCREEN_REQUIRED - set(screen.columns))
 if missing_screen:
@@ -136,9 +173,9 @@ with st.expander("Search & analytical controls", expanded=False):
     top_n = x2.slider("Ranking depth", 10, min(100, max(10, len(exporters))), min(25, max(10, len(exporters))))
     threshold = x3.selectbox("Strategic coverage", [50, 60, 70, 80, 90], index=1)
 
-filtered = exporters.copy()
+filtered = exporters_display.copy()
 if q.strip():
-    cols = [x for x in ["exporter_name", "ntn", "email", "telephone", "address"] if x in filtered]
+    cols = [x for x in ["exporter_name", "ntn", "email", "contact_phone", "telephone", "address"] if x in filtered]
     mask = pd.Series(False, index=filtered.index)
     for col in cols:
         mask |= filtered[col].astype("string").str.contains(q.strip(), case=False, na=False)
@@ -163,16 +200,16 @@ with overview:
     fig.add_hline(y=60, line_dash="dash", annotation_text="60% coverage")
     st.plotly_chart(fig, use_container_width=True, config=PLOT_CONFIG)
     st.subheader(f"Top {top_n} exporters")
-    chart = exporters.head(top_n).sort_values("reported_value_rs")
-    fig = px.bar(chart, x="reported_value_rs", y="exporter_name", orientation="h", hover_data=[x for x in ["rank", "share", "cumulative_share", "ntn", "email", "telephone"] if x in chart], labels={"reported_value_rs": "Reported value (Rs)", "exporter_name": ""}, height=max(500, top_n * 27))
+    chart = exporters_display.head(top_n).sort_values("reported_value_rs")
+    fig = px.bar(chart, x="reported_value_rs", y="exporter_name", orientation="h", hover_data=[x for x in ["rank", "share", "cumulative_share", "ntn", "email", "contact_phone"] if x in chart], labels={"reported_value_rs": "Reported value (Rs)", "exporter_name": ""}, height=max(500, top_n * 27))
     st.plotly_chart(fig, use_container_width=True, config=CLEAN_PLOT_CONFIG)
 
 with leaders:
     st.subheader("Exporter ranking, concentration & contact directory")
     st.caption("Company-level view. Values aggregate all rows observed for the exporter in the selected chapter extract.")
-    ranking_cols = [x for x in ["rank", "exporter_name", "ntn", "reported_value_rs", "share", "cumulative_share", "record_count", "avg_value_per_reported_record_rs", "hs8_count", "hs4_count", "largest_hs8", "email", "telephone", "address"] if x in filtered]
+    ranking_cols = [x for x in ["rank", "exporter_name", "ntn", "contact_phone", "reported_value_rs", "share", "cumulative_share", "record_count", "avg_value_per_reported_record_rs", "hs8_count", "hs4_count", "largest_hs8", "email", "address"] if x in filtered]
     st.dataframe(filtered[ranking_cols], hide_index=True, use_container_width=True, height=680, column_config={
-        "rank": "Rank", "exporter_name": "Exporter", "ntn": "NTN",
+        "rank": "Rank", "exporter_name": "Exporter", "ntn": "NTN", "contact_phone": "Phone",
         "reported_value_rs": st.column_config.NumberColumn("Reported value (Rs)", format="%,.0f"),
         "share": st.column_config.NumberColumn("Extract share", format="%.2%%"),
         "cumulative_share": st.column_config.NumberColumn("Cumulative", format="%.2%%"),
@@ -209,18 +246,17 @@ with shortlist:
     m3.metric("Tier C", c_count, help="All other observed exporter-HS8 capabilities. These remain visible and are not treated as failures.")
     tier_options = ["A — high-priority evidence", "B — priority review", "C — broader pipeline"]
     tier_filter = st.multiselect("Evidence tier", tier_options, default=tier_options[:2])
-    s = screen[screen["evidence_tier"].isin(tier_filter)].copy() if tier_filter else screen.copy()
+    s = screen_display[screen_display["evidence_tier"].isin(tier_filter)].copy() if tier_filter else screen_display.copy()
     tier_display = {
         "A — high-priority evidence": "A",
         "B — priority review": "B",
         "C — broader pipeline": "C",
     }
     s["tier"] = s["evidence_tier"].map(tier_display).fillna(s["evidence_tier"])
-    if "telephone" in s:
-        s["telephone"] = s["telephone"].fillna("")
-    show = [x for x in ["tier", "chapter_rank", "exporter_name", "ntn", "telephone", "firm_chapter_value_rs", "firm_chapter_share", "firm_hs8_breadth", "hs8", "product_name", "hs8_value_rs", "rank_within_hs8", "share_within_hs8", "firms_in_hs8", "screening_reason", "email"] if x in s]
+    s["contact_phone"] = s["contact_phone"].fillna("")
+    show = [x for x in ["tier", "chapter_rank", "exporter_name", "ntn", "contact_phone", "firm_chapter_value_rs", "firm_chapter_share", "firm_hs8_breadth", "hs8", "product_name", "hs8_value_rs", "rank_within_hs8", "share_within_hs8", "firms_in_hs8", "screening_reason", "email"] if x in s]
     st.dataframe(s[show], hide_index=True, use_container_width=True, height=680, column_config={
-        "tier": "Tier", "chapter_rank": "Company chapter rank", "exporter_name": "Exporter", "ntn": "NTN", "telephone": "Phone",
+        "tier": "Tier", "chapter_rank": "Company chapter rank", "exporter_name": "Exporter", "ntn": "NTN", "contact_phone": "Phone",
         "firm_chapter_value_rs": st.column_config.NumberColumn("Firm chapter value (Rs)", format="%,.0f"),
         "firm_chapter_share": st.column_config.NumberColumn("Firm extract share", format="%.2%%"),
         "firm_hs8_breadth": "Observed HS8 breadth", "hs8": "HS8", "product_name": "Product",
@@ -244,6 +280,31 @@ with diligence:
         st.error("One or more reconciliation controls failed. Do not rely on the affected outputs until the differences are resolved.")
     st.dataframe(reconciliation.checks, hide_index=True, use_container_width=True)
     st.download_button("Download reconciliation report", reconciliation.checks.to_csv(index=False).encode("utf-8-sig"), f"chapter_{chapter_label}_reconciliation.csv", "text/csv")
+
+    st.subheader("Contact enrichment integrity")
+    if contact_error:
+        st.error("Contact sidecar was not applied: " + contact_error)
+    elif contact_audit is None:
+        st.info("No contact sidecar is loaded. Export calculations and reconciliation remain fully operational.")
+    else:
+        q1, q2, q3, q4 = st.columns(4)
+        q1.metric("Contact rows in chapter", contact_audit.contact_rows_for_chapter)
+        q2.metric("Safe phone keys", contact_audit.safe_phone_keys)
+        q3.metric("Ambiguous identity keys", contact_audit.ambiguous_identity_keys)
+        q4.metric("Rows still without phone", contact_audit.rows_without_phone)
+        contact_checks = pd.DataFrame({
+            "Control": [
+                "Analytical calculations performed before contact enrichment",
+                "Contact join changes target row count",
+                "Phone match requires chapter + normalized exporter + unique NTN",
+                "Conflicting phone values are assigned",
+                "Multiple NTNs under same chapter/exporter are assigned",
+            ],
+            "Result": ["PASS", "PASS", "PASS", "NO", "NO"],
+        })
+        st.dataframe(contact_checks, hide_index=True, use_container_width=True)
+        st.caption("Phone numbers are display-only metadata. Ambiguous identities or conflicting phone values are deliberately left blank rather than guessed.")
+
     st.subheader("Source controls")
     checks = pd.DataFrame({"Control": ["Source mode", "Source sheet", "Source rows", "Source columns", "Duplicate rows", "Invalid HS8", "Non-positive/missing value", "Unique exporters", "Unique NTNs", "Unique HS8", "Detected chapter"], "Result": [source_mode, sheet, a.rows, a.columns, a.duplicate_rows, a.invalid_hs8, a.nonpositive_values, a.unique_exporters, a.unique_ntns, a.unique_hs8, chapter_label]})
     st.dataframe(checks, hide_index=True, use_container_width=True)
@@ -258,8 +319,9 @@ with methodology:
 **Screening principle:** keep company-level scale separate from product-level capability. Surface the evidence used for prioritisation instead of hiding it inside a composite score. Tier rules are explicit policy thresholds and are not statistical estimates.  
 **Workbook principle:** a 24-sheet workbook is a navigation container only. One selected HS2 sheet is analysed at a time so rankings, shares and concentration remain chapter-specific.  
 **Reconciliation principle:** each selected chapter is independently re-aggregated from source fields and compared with dashboard totals, concentration metrics, exporter-HS8 values, shares and ranks. Any failed control is surfaced in Data Assurance.  
+**Contact-enrichment principle:** phone numbers are attached only after analytical calculations. Sidecar matches require the selected chapter, normalized exporter identity and exactly one NTN in the analytical source; conflicting contacts or ambiguous legal identities are withheld rather than guessed.  
 **Next enrichment:** PBS HS8 × destination × value × quantity × fiscal year, followed by global demand, Pakistan share, competitor concentration, market access and policy indicators.""")
-    st.code("Workbook → chapter selector → normalization → audit → company aggregation → HS8 aggregation → exporter×HS8 aggregation → within-HS8 position → transparent evidence tier → reconciliation → due diligence")
+    st.code("Workbook → chapter selector → normalization → audit → company aggregation → HS8 aggregation → exporter×HS8 aggregation → within-HS8 position → transparent evidence tier → reconciliation → display-only contact enrichment → due diligence")
 
 st.divider()
 st.caption(f"Source: {source_mode} · Sheet: {sheet} · Chapter {chapter_label} · {a.rows:,} rows · {a.unique_exporters:,} exporters | Internal decision-support")

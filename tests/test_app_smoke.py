@@ -56,10 +56,14 @@ def test_reconciliation_is_visible_and_old_copy_is_removed():
     assert "The previous 65% scale + 35% scarcity" not in source
 
 
-def test_strategic_shortlist_has_phone_next_to_ntn_and_compact_tiers():
+def test_strategic_shortlist_has_safe_phone_next_to_ntn_and_compact_tiers():
     source = Path("app.py").read_text(encoding="utf-8")
-    assert '["tier", "chapter_rank", "exporter_name", "ntn", "telephone", "firm_chapter_value_rs"' in source
-    assert '"telephone": "Phone"' in source
+    assert 'CONTACT_FILE = Path("Contact_list_by_Company_hs_chapter.xlsx")' in source
+    assert 'enrich_contact_display' in source
+    assert '["tier", "chapter_rank", "exporter_name", "ntn", "contact_phone", "firm_chapter_value_rs"' in source
+    assert '"contact_phone": "Phone"' in source
+    assert 'Contact enrichment integrity' in source
+    assert 'Ambiguous identity keys' in source
     assert 'm1.metric("Tier A",' in source
     assert 'm2.metric("Tier B",' in source
     assert 'm3.metric("Tier C",' in source
