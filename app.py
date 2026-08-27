@@ -204,15 +204,23 @@ with shortlist:
     b_count = int((screen["evidence_tier"] == "B — priority review").sum())
     c_count = int((screen["evidence_tier"] == "C — broader pipeline").sum())
     m1, m2, m3 = st.columns(3)
-    m1.metric("Tier A · high-priority evidence", a_count, help="Firm is top-decile by observed chapter scale, top 3 within its HS8, and has at least 10% of observed HS8 value.")
-    m2.metric("Tier B · priority review", b_count, help="Either top 3 with at least 10% observed HS8 share, or a top-decile firm in an HS8 with five or fewer observed firms.")
-    m3.metric("Tier C · broader pipeline", c_count, help="All other observed exporter-HS8 capabilities. These remain visible and are not treated as failures.")
+    m1.metric("Tier A", a_count, help="Firm is top-decile by observed chapter scale, top 3 within its HS8, and has at least 10% of observed HS8 value.")
+    m2.metric("Tier B", b_count, help="Either top 3 with at least 10% observed HS8 share, or a top-decile firm in an HS8 with five or fewer observed firms.")
+    m3.metric("Tier C", c_count, help="All other observed exporter-HS8 capabilities. These remain visible and are not treated as failures.")
     tier_options = ["A — high-priority evidence", "B — priority review", "C — broader pipeline"]
     tier_filter = st.multiselect("Evidence tier", tier_options, default=tier_options[:2])
     s = screen[screen["evidence_tier"].isin(tier_filter)].copy() if tier_filter else screen.copy()
-    show = [x for x in ["evidence_tier", "chapter_rank", "exporter_name", "ntn", "firm_chapter_value_rs", "firm_chapter_share", "firm_hs8_breadth", "hs8", "product_name", "hs8_value_rs", "rank_within_hs8", "share_within_hs8", "firms_in_hs8", "screening_reason", "email", "telephone"] if x in s]
+    tier_display = {
+        "A — high-priority evidence": "A",
+        "B — priority review": "B",
+        "C — broader pipeline": "C",
+    }
+    s["tier"] = s["evidence_tier"].map(tier_display).fillna(s["evidence_tier"])
+    if "telephone" in s:
+        s["telephone"] = s["telephone"].fillna("")
+    show = [x for x in ["tier", "chapter_rank", "exporter_name", "ntn", "telephone", "firm_chapter_value_rs", "firm_chapter_share", "firm_hs8_breadth", "hs8", "product_name", "hs8_value_rs", "rank_within_hs8", "share_within_hs8", "firms_in_hs8", "screening_reason", "email"] if x in s]
     st.dataframe(s[show], hide_index=True, use_container_width=True, height=680, column_config={
-        "evidence_tier": "Evidence tier", "chapter_rank": "Company chapter rank", "exporter_name": "Exporter", "ntn": "NTN",
+        "tier": "Tier", "chapter_rank": "Company chapter rank", "exporter_name": "Exporter", "ntn": "NTN", "telephone": "Phone",
         "firm_chapter_value_rs": st.column_config.NumberColumn("Firm chapter value (Rs)", format="%,.0f"),
         "firm_chapter_share": st.column_config.NumberColumn("Firm extract share", format="%.2%%"),
         "firm_hs8_breadth": "Observed HS8 breadth", "hs8": "HS8", "product_name": "Product",
