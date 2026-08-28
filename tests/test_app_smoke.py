@@ -11,7 +11,7 @@ def test_executive_dashboard_readability_guards():
     assert 'HHI concentration index' in source
     assert 'CLEAN_PLOT_CONFIG' in source
     assert 'displayModeBar' in source
-    assert "{c['top10_share']*100:.0f}%" in source
+    assert "{c['top10_share']*100:.2f}%" in source
     assert 'Observed HS8 share' in source
     assert 'Evidence tier' in source
     assert 'Why surfaced' in source
@@ -83,3 +83,20 @@ def test_cross_chapter_exporter_product_deep_dive_is_separate_and_auditable():
     assert 'HS8 share of exporter = exporter value in that HS8 / exporter total value across all loaded HS chapters' in source
     assert 'Exporter share of HS8 = exporter reported value in the HS8 / total reported value of that HS8' in source
     assert 'This cross-chapter view does not feed back into chapter KPIs or tiers.' in source
+
+
+def test_performance_cache_forms_and_percentage_precision():
+    source = Path("app.py").read_text(encoding="utf-8")
+    assert "_chapter_sheets_from_path" in source
+    assert "_selected_sheet_from_path" in source
+    assert "_contacts_from_path" in source
+    assert "_cross_chapter_repo_cache" in source
+    assert "validated fast cache" in source
+    assert 'st.form("deep_exporter_search_form"' in source
+    assert 'st.form("deep_hs8_search_form"' in source
+    assert "find_exporters_fast" in source
+    assert "exporter_portfolio_fast" in source
+    assert "hs8_exporters_fast" in source
+    assert "{c['top10_share']*100:.2f}%" in source
+    assert 'tickformat=".2%"' in source
+    assert 'format="%.1%%"' not in source
