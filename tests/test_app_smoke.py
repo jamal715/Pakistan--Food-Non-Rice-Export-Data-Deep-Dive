@@ -11,7 +11,7 @@ def test_executive_dashboard_readability_guards():
     assert 'HHI concentration index' in source
     assert 'CLEAN_PLOT_CONFIG' in source
     assert 'displayModeBar' in source
-    assert "{c['top10_share']*100:.0f}%" in source
+    assert "{c['top10_share']*100:.2f}%" in source
     assert 'Observed HS8 share' in source
     assert 'Evidence tier' in source
     assert 'Why surfaced' in source
@@ -84,6 +84,7 @@ def test_cross_chapter_exporter_product_deep_dive_is_separate_and_auditable():
     assert 'Exporter share of HS8 = exporter reported value in the HS8 / total reported value of that HS8' in source
     assert 'This cross-chapter view does not feed back into chapter KPIs or tiers.' in source
 
+
 def test_performance_cache_forms_and_percentage_precision():
     source = Path("app.py").read_text(encoding="utf-8")
     assert "_chapter_sheets_from_path" in source
@@ -99,4 +100,3 @@ def test_performance_cache_forms_and_percentage_precision():
     assert "{c['top10_share']*100:.2f}%" in source
     assert 'tickformat=".2%"' in source
     assert 'format="%.1%%"' not in source
-
