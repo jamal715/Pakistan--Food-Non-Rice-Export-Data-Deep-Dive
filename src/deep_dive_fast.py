@@ -25,7 +25,7 @@ from .deep_dive import (
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        for chunk in iter(lambda: handle.read(1024 * 1024, b""), b""):
             digest.update(chunk)
     return digest.hexdigest()
 
@@ -67,6 +67,12 @@ def load_cross_chapter_cache(source_path: Path, cache_path: Path, manifest_path:
     for col in ["exported_value_rs", "reported_record_count"]:
         if col in universe:
             universe[col] = pd.to_numeric(universe[col], errors="coerce")
+    # CSV round-tripping represents blank text as NA by default. Restore the same empty-string
+    # identity semantics used by the authoritative workbook loader, especially for missing NTNs.
+    for col in universe.columns:
+        if col not in {"exported_value_rs", "reported_record_count"}:
+            universe[col] = universe[col].fillna("")
+
     if len(universe) != int(manifest.get("cache_rows", -1)):
         return None
     if "chapter" not in universe or "hs8" not in universe or "_ntn_key" not in universe or "_exporter_key" not in universe:
