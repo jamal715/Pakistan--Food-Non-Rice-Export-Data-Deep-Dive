@@ -25,7 +25,7 @@ jobs:
       - name: Apply guarded source patch
         run: python scripts/apply_performance_patch.py
       - name: Build validated cross-chapter cache
-        run: python scripts/build_deep_dive_cache.py
+        run: PYTHONPATH=. python scripts/build_deep_dive_cache.py
       - name: Remove one-time patch machinery
         run: rm scripts/apply_performance_patch.py .github/workflows/apply_performance_upgrade.yml
       - name: Commit optimized app and cache
