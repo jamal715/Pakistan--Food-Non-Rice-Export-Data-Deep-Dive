@@ -11,7 +11,8 @@ import plotly.express as px
 import streamlit as st
 import src.analysis as analysis
 from src.contact_enrichment import enrich_contact_display, load_contact_workbook
-from src.deep_dive import exporter_portfolio, find_exporters, hs8_exporters, load_cross_chapter_universe
+from src.deep_dive import load_cross_chapter_universe
+from src.deep_dive_fast import build_fast_indexes, exporter_portfolio_fast, find_exporters_fast, hs8_exporters_fast, load_cross_chapter_cache
 from src.reconciliation import reconcile_chapter
 
 analysis = importlib.reload(analysis)
@@ -39,6 +40,8 @@ MASTER_FILE = Path("TDAP_Export_Directory_HS01_24.xlsx")
 LEGACY_FILE = Path("Chapter_12.xlsx")
 CONTACT_FILE = Path("Contact_list_by_Company_hs_chapter.xlsx")
 LOGO_FILE = Path("assets/ncgcl_logo.png")
+DEEP_CACHE_FILE = Path("data/cross_chapter_universe.csv.gz")
+DEEP_CACHE_MANIFEST = Path("data/cross_chapter_universe.manifest.json")
 PLOT_CONFIG = {"displaylogo": False, "responsive": True, "scrollZoom": False, "modeBarButtonsToRemove": ["lasso2d", "select2d", "autoScale2d", "toggleSpikelines"]}
 CLEAN_PLOT_CONFIG = {"displayModeBar": False, "responsive": True}
 
@@ -74,13 +77,53 @@ def _logo_data_uri() -> str | None:
 
 
 @st.cache_data(show_spinner=False)
-def _cross_chapter_from_path(path_string: str):
+def _chapter_sheets_from_path(path_string: str, mtime_ns: int):
+    return _chapter_sheets(Path(path_string))
+
+
+@st.cache_data(show_spinner=False)
+def _chapter_sheets_from_bytes(payload: bytes):
+    return _chapter_sheets(BytesIO(payload))
+
+
+@st.cache_data(show_spinner=False)
+def _selected_sheet_from_path(path_string: str, mtime_ns: int, sheet_name: str | None):
+    return load_excel(Path(path_string), sheet_name=sheet_name)
+
+
+@st.cache_data(show_spinner=False)
+def _selected_sheet_from_bytes(payload: bytes, sheet_name: str | None):
+    return load_excel(BytesIO(payload), sheet_name=sheet_name)
+
+
+@st.cache_data(show_spinner=False)
+def _contacts_from_path(path_string: str, mtime_ns: int):
+    return load_contact_workbook(Path(path_string))
+
+
+@st.cache_data(show_spinner=False)
+def _contacts_from_bytes(payload: bytes):
+    return load_contact_workbook(BytesIO(payload))
+
+
+@st.cache_data(show_spinner=False)
+def _cross_chapter_from_path(path_string: str, mtime_ns: int):
     return load_cross_chapter_universe(Path(path_string))
 
 
 @st.cache_data(show_spinner=False)
 def _cross_chapter_from_bytes(payload: bytes):
     return load_cross_chapter_universe(BytesIO(payload))
+
+
+@st.cache_data(show_spinner=False)
+def _cross_chapter_repo_cache(source_path: str, source_mtime_ns: int, cache_path: str, cache_mtime_ns: int, manifest_path: str, manifest_mtime_ns: int):
+    return load_cross_chapter_cache(Path(source_path), Path(cache_path), Path(manifest_path))
+
+
+@st.cache_data(show_spinner=False)
+def _deep_indexes_cached(universe: pd.DataFrame, contacts: pd.DataFrame | None):
+    return build_fast_indexes(universe, contacts)
 
 
 with st.sidebar:
@@ -99,7 +142,12 @@ with st.sidebar:
         st.error("No workbook available. Add the master workbook or upload a chapter workbook.")
         st.stop()
 
-    valid_sheets = _chapter_sheets(source)
+    source_payload = source.getvalue() if hasattr(source, "getvalue") else None
+    source_mtime_ns = None if source_payload is not None else source.stat().st_mtime_ns
+    if source_payload is not None:
+        valid_sheets = _chapter_sheets_from_bytes(source_payload)
+    else:
+        valid_sheets = _chapter_sheets_from_path(str(source), source_mtime_ns)
     if len(valid_sheets) > 1:
         labels = {f"HS {x['chapter']} · {x['sheet']}": x for x in valid_sheets}
         default_idx = next((i for i, x in enumerate(valid_sheets) if x["chapter"] == "12"), 0)
@@ -129,7 +177,10 @@ with st.sidebar:
     st.caption("Decision guardrails")
     st.caption("TDAP record count is not physical quantity. Extract shares are not Pakistan national shares until reconciled with official national totals.")
 
-raw, sheet = load_excel(source, sheet_name=selected_sheet)
+if source_payload is not None:
+    raw, sheet = _selected_sheet_from_bytes(source_payload, selected_sheet)
+else:
+    raw, sheet = _selected_sheet_from_path(str(source), source_mtime_ns, selected_sheet)
 df = normalize(raw)
 a = audit(df)
 if a.missing_required:
@@ -154,7 +205,10 @@ contact_audit = None
 contacts = None
 if contact_source is not None:
     try:
-        contacts = load_contact_workbook(contact_source)
+        if hasattr(contact_source, "getvalue"):
+            contacts = _contacts_from_bytes(contact_source.getvalue())
+        else:
+            contacts = _contacts_from_path(str(contact_source), contact_source.stat().st_mtime_ns)
         exporters_display, exporter_contact_audit = enrich_contact_display(exporters, df, contacts, chapter_label)
         screen_display, contact_audit = enrich_contact_display(screen, df, contacts, chapter_label)
     except Exception as exc:
@@ -185,9 +239,26 @@ try:
     if hasattr(deep_source, "getvalue"):
         deep_universe, deep_audit = _cross_chapter_from_bytes(deep_source.getvalue())
     else:
-        deep_universe, deep_audit = _cross_chapter_from_path(str(deep_source))
+        deep_stamp = deep_source.stat().st_mtime_ns
+        cached_pair = None
+        if Path(deep_source) == MASTER_FILE and DEEP_CACHE_FILE.exists() and DEEP_CACHE_MANIFEST.exists():
+            cached_pair = _cross_chapter_repo_cache(
+                str(MASTER_FILE), deep_stamp,
+                str(DEEP_CACHE_FILE), DEEP_CACHE_FILE.stat().st_mtime_ns,
+                str(DEEP_CACHE_MANIFEST), DEEP_CACHE_MANIFEST.stat().st_mtime_ns,
+            )
+        if cached_pair is not None:
+            deep_universe, deep_audit = cached_pair
+            deep_source_mode += " · validated fast cache"
+        else:
+            deep_universe, deep_audit = _cross_chapter_from_path(str(deep_source), deep_stamp)
 except Exception as exc:
     deep_dive_error = str(exc)
+
+deep_exporter_index = pd.DataFrame()
+deep_contact_directory = pd.DataFrame()
+if deep_universe is not None:
+    deep_exporter_index, deep_contact_directory = _deep_indexes_cached(deep_universe, contacts)
 
 SCREEN_REQUIRED = {"evidence_tier", "chapter_rank", "exporter_name", "firm_chapter_value_rs", "firm_chapter_share", "hs8", "hs8_value_rs", "rank_within_hs8", "share_within_hs8", "firms_in_hs8", "screening_reason"}
 missing_screen = sorted(SCREEN_REQUIRED - set(screen.columns))
@@ -221,7 +292,7 @@ with overview:
     k1.metric("TDAP reported export value", f"Rs {total_bn:,.0f} bn")
     k2.metric("Unique exporters", f"{a.unique_exporters:,}")
     k3.metric("Distinct HS8 products", f"{a.unique_hs8:,}")
-    k4.metric("Top 10 exporters' share", f"{c['top10_share']*100:.0f}%")
+    k4.metric("Top 10 exporters' share", f"{c['top10_share']*100:.2f}%")
     k5.metric("Exporters needed for 60%", f"{c['exporters_to_60pct']:,}")
     k6.metric("HHI concentration index", f"{c['hhi']:,.0f}")
     st.caption("KPIs describe the selected TDAP chapter extract, not Pakistan's national export market, until reconciliation with official national totals.")
@@ -254,7 +325,7 @@ with products:
     st.subheader("HS8 product portfolio")
     p1, p2 = st.columns([1.15, 1])
     with p1:
-        fig = px.treemap(hs8, path=["hs8"], values="reported_value_rs", hover_data=[x for x in ["product_name", "exporters", "share"] if x in hs8], title=f"Where reported Chapter {chapter_label} value sits")
+        fig = px.treemap(hs8, path=["hs8"], values="reported_value_rs", hover_data={"product_name": True, "exporters": True, "share": ":.2%"}, title=f"Where reported Chapter {chapter_label} value sits")
         st.plotly_chart(fig, use_container_width=True, config=CLEAN_PLOT_CONFIG)
     with p2:
         fig = px.scatter(hs8, x="exporters", y="reported_value_rs", size="reported_value_rs", hover_name="hs8", hover_data=["product_name"], log_y=True, title="Scale vs exporter participation")
@@ -278,9 +349,14 @@ with deep_dive:
         search_mode = st.radio("Explore by", ["Exporter (name or NTN)", "HS8 product"], horizontal=True, key="deep_dive_mode")
 
         if search_mode == "Exporter (name or NTN)":
-            exporter_query = st.text_input("Search exporter", placeholder="Type company name or NTN", key="deep_exporter_query")
-            if exporter_query.strip():
-                matches = find_exporters(deep_universe, exporter_query)
+            with st.form("deep_exporter_search_form", clear_on_submit=False):
+                exporter_input = st.text_input("Search exporter", placeholder="Type company name or NTN", key="deep_exporter_query_input")
+                exporter_submit = st.form_submit_button("Search exporter")
+            if exporter_submit:
+                st.session_state["deep_exporter_committed_query"] = exporter_input.strip()
+            exporter_query = st.session_state.get("deep_exporter_committed_query", "")
+            if exporter_query:
+                matches = find_exporters_fast(deep_exporter_index, exporter_query)
                 if matches.empty:
                     st.warning("No verified NTN matched that exporter search across the loaded chapter universe.")
                 else:
@@ -288,8 +364,8 @@ with deep_dive:
                     for _, row in matches.iterrows():
                         label = f"{row['exporter_name']} · NTN {row['ntn']} · {row['hs8_products']} HS8 · {row['chapters']} chapters"
                         option_map[label] = row["ntn"]
-                    selected_exporter = st.selectbox("Select verified exporter identity", list(option_map), key="deep_exporter_select")
-                    profile = exporter_portfolio(deep_universe, option_map[selected_exporter], contacts)
+                    selected_exporter = st.selectbox("Select verified exporter identity", list(option_map), key=f"deep_exporter_select_{exporter_query}")
+                    profile = exporter_portfolio_fast(deep_universe, option_map[selected_exporter], deep_contact_directory)
                     sm = profile.summary
                     d1, d2, d3, d4 = st.columns(4)
                     d1.metric("Total reported value", f"Rs {sm['total_reported_value_rs']/1e9:,.2f} bn")
@@ -303,7 +379,7 @@ with deep_dive:
                     st.markdown("**Product mix** — each share equals this exporter's reported value in the HS8 divided by this exporter's total reported value across the loaded HS chapters.")
                     chart = profile.table.sort_values("share_of_exporter")
                     fig = px.bar(chart, x="share_of_exporter", y="hs8", orientation="h", hover_data=["chapter", "product_name", "reported_value_rs"], labels={"share_of_exporter": "Share of exporter portfolio", "hs8": "HS8"}, height=max(420, min(900, len(chart) * 30)))
-                    fig.update_xaxes(tickformat=".0%")
+                    fig.update_xaxes(tickformat=".2%")
                     st.plotly_chart(fig, use_container_width=True, config=CLEAN_PLOT_CONFIG)
                     st.dataframe(profile.table, hide_index=True, use_container_width=True, column_config={
                         "rank": "Rank", "chapter": "HS chapter", "hs8": "HS8", "product_name": "Product description",
@@ -317,14 +393,19 @@ with deep_dive:
                     st.download_button("Download exporter product portfolio", profile.table.to_csv(index=False).encode("utf-8-sig"), f"exporter_{sm['ntn']}_hs8_portfolio.csv", "text/csv")
 
         else:
-            hs8_query = st.text_input("Enter exact HS8 code", placeholder="e.g. 12074000", key="deep_hs8_query")
-            if hs8_query.strip():
+            with st.form("deep_hs8_search_form", clear_on_submit=False):
+                hs8_input = st.text_input("Enter exact HS8 code", placeholder="e.g. 12074000", key="deep_hs8_query_input")
+                hs8_submit = st.form_submit_button("Search HS8")
+            if hs8_submit:
+                st.session_state["deep_hs8_committed_query"] = hs8_input.strip()
+            hs8_query = st.session_state.get("deep_hs8_committed_query", "")
+            if hs8_query:
                 digits = re.sub(r"\D", "", hs8_query)
                 if len(digits) != 8:
                     st.warning("Enter an exact 8-digit HS8 code so the denominator remains unambiguous.")
                 else:
                     try:
-                        profile = hs8_exporters(deep_universe, digits, contacts)
+                        profile = hs8_exporters_fast(deep_universe, digits, deep_contact_directory)
                     except KeyError as exc:
                         st.warning(str(exc))
                     except ValueError as exc:
@@ -342,7 +423,7 @@ with deep_dive:
                         st.markdown("**Exporter position inside this HS8** — each share equals the exporter's reported value in this HS8 divided by the total reported value of this HS8 across the loaded chapter universe.")
                         chart = profile.table.head(30).sort_values("share_of_hs8")
                         fig = px.bar(chart, x="share_of_hs8", y="exporter_name", orientation="h", hover_data=["ntn", "reported_value_rs", "phone"], labels={"share_of_hs8": "Share of HS8", "exporter_name": ""}, height=max(480, min(1000, len(chart) * 30)))
-                        fig.update_xaxes(tickformat=".0%")
+                        fig.update_xaxes(tickformat=".2%")
                         st.plotly_chart(fig, use_container_width=True, config=CLEAN_PLOT_CONFIG)
                         st.dataframe(profile.table, hide_index=True, use_container_width=True, height=650, column_config={
                             "rank": "HS8 rank", "exporter_name": "Exporter", "ntn": "NTN", "phone": "Phone", "email": "Email",
@@ -383,7 +464,7 @@ with shortlist:
         "firm_hs8_breadth": "Observed HS8 breadth", "hs8": "HS8", "product_name": "Product",
         "hs8_value_rs": st.column_config.NumberColumn("HS8 value (Rs)", format="%,.0f"),
         "rank_within_hs8": "HS8 rank",
-        "share_within_hs8": st.column_config.NumberColumn("Observed HS8 share", format="%.1%%"),
+        "share_within_hs8": st.column_config.NumberColumn("Observed HS8 share", format="%.2%%"),
         "firms_in_hs8": "Firms in HS8", "screening_reason": "Why surfaced",
     })
     st.markdown("**Tier rules**  \n**A:** firm is in the top 10% by observed chapter scale **and** ranks top 3 in the HS8 **and** contributes at least 10% of observed HS8 value.  \n**B:** either (i) top 3 in HS8 with ≥10% observed HS8 share, or (ii) top-10%-scale firm operating in an HS8 with ≤5 observed firms.  \n**C:** broader pipeline. These thresholds are policy screening rules, not statistical estimates; change them only through documented methodology review.")
