@@ -1,3 +1,10 @@
+import pytest
+
+# The existing dashboard CI intentionally installs only the root requirements.
+# Keep those workflows isolated from this optional FBR module, while the
+# dedicated FBR workflow installs lxml and runs these parser tests fully.
+pytest.importorskip("lxml")
+
 from fbr_parser import parse_profile
 from export_results import MASTER_COLUMNS
 
