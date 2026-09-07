@@ -1,0 +1,25 @@
+name: FBR enrichment tests
+
+on:
+  pull_request:
+    paths:
+      - 'fbr_enrichment/**'
+      - '.github/workflows/fbr-enrichment.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'fbr_enrichment/**'
+      - '.github/workflows/fbr-enrichment.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install isolated FBR dependencies
+        run: pip install -r fbr_enrichment/requirements.txt
+      - name: Run FBR enrichment tests
+        run: python -m pytest -q fbr_enrichment/tests
